@@ -6,11 +6,16 @@ This client is designed as a state machine with a very low level
 interface. It can be used as a library to build smarter clients with
 more features.
 
-The state machine supports 4 basic operations:
+The state machine supports 5 basic operations:
 * connect
 * store
 * retrieve
+* get size
 * close
+
+Additionally, it is possible to monitor progress by means of an
+rts callback and corresponding cts API function, which needs to be
+called in response to the rts callback.
 
 LWFTP requires the remote server to support binary transfer and
 passive connection.
