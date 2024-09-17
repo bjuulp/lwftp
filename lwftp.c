@@ -323,7 +323,7 @@ static err_t lwftp_send_msg(lwftp_session_t *s, const char* msg, size_t len)
 {
   err_t error;
 
-  LWIP_DEBUGF(LWFTP_TRACE,("lwftp:sending %s",msg));
+  LWIP_DEBUGF(LWFTP_TRACE,("lwftp:sending %s\n",msg));
   error = tcp_write(s->control_pcb, msg, len, 0);
   if ( error != ERR_OK ) 
   {
@@ -398,8 +398,21 @@ static void lwftp_control_process(lwftp_session_t *s, struct tcp_pcb *tpcb, stru
     case LWFTP_TYPE_SENT:
       if (response>0) {
         if (response==200) {
-          lwftp_send_msg(s, PTRNLEN("PASV\r\n"));
-          s->control_state = LWFTP_PASV_SENT;
+          switch (s->target_state) {
+            case LWFTP_SIZE_SENT:
+              lwftp_send_msg(s, PTRNLEN("SIZE "));
+              lwftp_send_msg(s, s->remote_path, strlen(s->remote_path));
+              lwftp_send_msg(s, PTRNLEN("\r\n"));
+              s->control_state = LWFTP_SIZE_SENT;
+              break;
+            case LWFTP_RETR_SENT:
+            case LWFTP_STOR_SENT:
+              lwftp_send_msg(s, PTRNLEN("PASV\r\n"));
+              s->control_state = LWFTP_PASV_SENT;
+              break;
+            default:
+              LWIP_DEBUGF(LWFTP_SEVERE, ("lwftp:unhandled state (%d)\n",s->control_state));
+            }
         } else {
           s->control_state = LWFTP_QUIT;
         }
@@ -415,6 +428,12 @@ static void lwftp_control_process(lwftp_session_t *s, struct tcp_pcb *tpcb, stru
               break;
             case LWFTP_RETR_SENT:
               lwftp_send_msg(s, PTRNLEN("RETR "));
+              break;
+            case LWFTP_SIZE_SENT:
+              lwftp_send_msg(s, PTRNLEN("SIZE "));
+              lwftp_send_msg(s, s->remote_path, strlen(s->remote_path));
+              lwftp_send_msg(s, PTRNLEN("\r\n"));
+              s->control_state = LWFTP_SIZE_SENT;
               break;
             default:
               LOG_ERROR("Unexpected internal state");
@@ -570,10 +589,9 @@ static void lwftp_send_SIZE(void *arg)
   lwftp_session_t *s = (lwftp_session_t*)arg;
 
   if ( s->control_state == LWFTP_LOGGED ) {
-    lwftp_send_msg(s, PTRNLEN("SIZE "));
-    lwftp_send_msg(s, s->remote_path, strlen(s->remote_path));
-    lwftp_send_msg(s, PTRNLEN("\r\n"));
-    s->control_state = LWFTP_SIZE_SENT;
+    lwftp_send_msg(s, PTRNLEN("TYPE I\r\n"));
+    s->control_state = LWFTP_TYPE_SENT;
+    s->target_state = LWFTP_SIZE_SENT;
   } else {
     LOG_ERROR("Unexpected condition");
     if (s->size_fn) s->size_fn(s->handle, LWFTP_RESULT_ERR_INTERNAL, 0);
