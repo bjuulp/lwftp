@@ -60,6 +60,7 @@ static err_t lwftp_pcb_close(struct tcp_pcb *tpcb)
   tcp_err(tpcb, NULL);
   tcp_recv(tpcb, NULL);
   tcp_sent(tpcb, NULL);
+  tcp_poll(tpcb, NULL, 0);
   error = tcp_close(tpcb);
   if ( error != ERR_OK ) {
     LWIP_DEBUGF(LWFTP_SEVERE, ("lwftp:pcb close failure, not implemented\n"));
@@ -104,6 +105,8 @@ static err_t lwftp_send_next_data(lwftp_session_t *s)
 static err_t lwftp_data_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err)
 {
   lwftp_session_t *s = (lwftp_session_t*)arg;
+  s->data_recv_timer = 0; 
+
   if (p) {
     if (s->data_sink) {
       struct pbuf *q;
@@ -177,6 +180,40 @@ static err_t lwftp_data_connected(void *arg, struct tcp_pcb *tpcb, err_t err)
   return err;
 }
 
+/** Close data connection
+ * @param pointer to lwftp session data
+ * @param result to pass to callback fn (if called)
+ */
+static void lwftp_data_close(lwftp_session_t *s, int result)
+{
+  if (s->data_pcb) {
+    lwftp_pcb_close(s->data_pcb);
+    s->data_pcb = NULL;
+  }
+  if ( s->done_fn ) {
+    s->done_fn(s->handle, result);
+  }
+}
+
+/** Verify that data_recv_timer has not expired
+ * @param pointer to lwftp session data
+ * @param pointer to data pcb
+ */
+static err_t lwftp_data_poll(void *arg, struct tcp_pcb *pcb)
+{
+  lwftp_session_t *s = (lwftp_session_t*)arg;
+  if (s != NULL)
+  {
+    if (s->data_recv_timer >= s->receive_timeout)
+    {
+      lwftp_data_close(s, LWFTP_RESULT_ERR_TIMEOUT);
+      s->control_state = LWFTP_LOGGED;
+    }
+    s->data_recv_timer++; 
+  }
+  return ERR_OK;
+}
+
 /** Open data connection for passive transfer
  * @param pointer to lwftp session data
  * @param pointer to incoming PASV response
@@ -207,39 +244,14 @@ static err_t lwftp_data_open(lwftp_session_t *s, struct pbuf *p)
   tcp_err(s->data_pcb, lwftp_data_err);
   tcp_recv(s->data_pcb, lwftp_data_recv);
   tcp_sent(s->data_pcb, lwftp_data_sent);
+  
+  // Setup timer to monitor data reception. 
+  // lwip slowtmr is invoked in 500ms intervals so interval=2 gives a 1 second resolution. 
+  s->data_recv_timer = 0; 
+  tcp_poll(s->data_pcb, lwftp_data_poll, 2); 
+  
   error = tcp_connect(s->data_pcb, &data_server, data_port, lwftp_data_connected);
   return error;
-}
-
-/** Send a message to control connection
- * @param pointer to lwftp session data
- * @param pointer to message string
- */
-static err_t lwftp_send_msg(lwftp_session_t *s, const char* msg, size_t len)
-{
-  err_t error;
-
-  LWIP_DEBUGF(LWFTP_TRACE,("lwftp:sending %s",msg));
-  error = tcp_write(s->control_pcb, msg, len, 0);
-  if ( error != ERR_OK ) {
-      LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:cannot write (%s)\n",lwip_strerr(error)));
-  }
-  return error;
-}
-
-/** Close data connection
- * @param pointer to lwftp session data
- * @param result to pass to callback fn (if called)
- */
-static void lwftp_data_close(lwftp_session_t *s, int result)
-{
-  if (s->data_pcb) {
-    lwftp_pcb_close(s->data_pcb);
-    s->data_pcb = NULL;
-  }
-  if ( s->done_fn ) {
-    s->done_fn(s->handle, result);
-  }
 }
 
 /** Close control connection
@@ -260,6 +272,43 @@ static void lwftp_control_close(lwftp_session_t *s, int result)
   if ( (result >= 0) && s->done_fn ) {
     s->done_fn(s->handle, result);
   }
+}
+
+/** Verify that control was received since last poll
+ * @param pointer to lwftp session data
+ * @param pointer to control pcb
+ */
+static err_t lwftp_control_poll(void *arg, struct tcp_pcb *pcb)
+{
+  lwftp_session_t *s = (lwftp_session_t*)arg;
+  if (s != NULL)
+  {
+    lwftp_control_close(s, LWFTP_RESULT_ERR_TIMEOUT);
+  }
+  return ERR_OK;
+}
+
+/** Send a message to control connection
+ * @param pointer to lwftp session data
+ * @param pointer to message string
+ */
+static err_t lwftp_send_msg(lwftp_session_t *s, const char* msg, size_t len)
+{
+  err_t error;
+
+  LWIP_DEBUGF(LWFTP_TRACE,("lwftp:sending %s",msg));
+  error = tcp_write(s->control_pcb, msg, len, 0);
+  if ( error != ERR_OK ) 
+  {
+    LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:cannot write (%s)\n",lwip_strerr(error)));
+  }
+  else if (strstr(msg, "\r\n") != NULL)
+  {
+    // We expect to see a response for every terminated command
+    // Factor of two comes from the fact that the slowtmr is invoked in 500ms intervals. 
+    tcp_poll(s->control_pcb, lwftp_control_poll, (s->receive_timeout * 2));
+  }
+  return error;
 }
 
 /** Main client state machine
@@ -530,6 +579,7 @@ static void lwftp_send_QUIT(void *arg)
 static err_t lwftp_control_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err)
 {
   lwftp_session_t *s = (lwftp_session_t*)arg;
+  tcp_poll(s->control_pcb, NULL, 0);
 
   if ( err == ERR_OK ) {
     if (p) {
