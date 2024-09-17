@@ -112,7 +112,7 @@ static void lwftp_data_sink(void* arg)
          }
       }
    } else {
-      LWIP_DEBUGF(LWFTP_SEVERE, ("lwftp: sinking %d bytes\n",p->tot_len));
+      LWIP_DEBUGF(LWFTP_SEVERE, ("lwftp: sinking %d bytes\n", s->data_pbuf->tot_len));
    }
 
    pbuf_free(s->data_pbuf);
@@ -329,6 +329,9 @@ static err_t lwftp_send_msg(lwftp_session_t *s, const char* msg, size_t len)
   }
   else if (strstr(msg, "\r\n") != NULL)
   {
+    // Signal that we want to transmit now
+    tcp_output(s->control_pcb);
+    
     // We expect to see a response for every terminated command
     // Factor of two comes from the fact that the slowtmr is invoked in 500ms intervals. 
     tcp_poll(s->control_pcb, lwftp_control_poll, (s->receive_timeout * 2));
@@ -480,12 +483,13 @@ static void lwftp_control_process(lwftp_session_t *s, struct tcp_pcb *tpcb, stru
     case LWFTP_XFERING:
       if (response>0) {
         if (response==226) {
+          s->control_state = LWFTP_LOGGED;
           result = LWFTP_RESULT_OK;
         } else {
+          s->control_state = LWFTP_DATAEND;
           result = LWFTP_RESULT_ERR_CLOSED;
           LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:expected 226, received %d\n",response));
         }
-        s->control_state = LWFTP_DATAEND;
       }
       break;
     case LWFTP_DATAEND:
@@ -519,7 +523,6 @@ static void lwftp_control_process(lwftp_session_t *s, struct tcp_pcb *tpcb, stru
       break;
     case LWFTP_QUIT:
       lwftp_send_msg(s, PTRNLEN("QUIT\r\n"));
-      tcp_output(s->control_pcb);
       s->control_state = LWFTP_QUIT_SENT;
       break;
     case LWFTP_CLOSING:
@@ -589,9 +592,15 @@ static void lwftp_send_QUIT(void *arg)
   lwftp_session_t *s = (lwftp_session_t*)arg;
 
   if (s->control_pcb) {
-    lwftp_send_msg(s, PTRNLEN("QUIT\r\n"));
-    tcp_output(s->control_pcb);
-    s->control_state = LWFTP_QUIT_SENT;
+    if (s->control_state == LWFTP_LOGGED)
+    {
+      lwftp_send_msg(s, PTRNLEN("QUIT\r\n"));
+      s->control_state = LWFTP_QUIT_SENT;
+    }
+    else
+    {
+       s->control_state = LWFTP_QUIT;
+    }
   }
 }
 
