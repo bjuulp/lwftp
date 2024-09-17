@@ -351,7 +351,7 @@ static void lwftp_control_process(lwftp_session_t *s, struct tcp_pcb *tpcb, stru
       break;
     case LWFTP_RETR_SENT:
       if (response>0) {
-        if (response==150) {
+        if (response==150 || response==125) {
           s->control_state = LWFTP_XFERING;
         } else if (response==550) {
             s->control_state = LWFTP_DATAEND;
