@@ -96,6 +96,29 @@ static err_t lwftp_send_next_data(lwftp_session_t *s)
   return ERR_OK;
 }
 
+static void lwftp_data_sink(void* arg)
+{
+  lwftp_session_t *s = (lwftp_session_t*)arg;
+   if (s->data_pbuf == NULL) {
+      return;
+   }
+   
+   if (s->data_sink) {
+      struct pbuf *q;
+      for (q=s->data_pbuf; q; q=q->next) {
+         s->data_sink(s->handle, q->payload, q->len);
+         if (s->data_pcb) {
+            tcp_recved(s->data_pcb, q->len);
+         }
+      }
+   } else {
+      LWIP_DEBUGF(LWFTP_SEVERE, ("lwftp: sinking %d bytes\n",p->tot_len));
+   }
+
+   pbuf_free(s->data_pbuf);
+   s->data_pbuf = NULL;
+}
+
 /** Handle data connection incoming data
  * @param pointer to lwftp session data
  * @param pointer to PCB
@@ -104,29 +127,31 @@ static err_t lwftp_send_next_data(lwftp_session_t *s)
  */
 static err_t lwftp_data_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err)
 {
-  lwftp_session_t *s = (lwftp_session_t*)arg;
-  s->data_recv_timer = 0; 
+   lwftp_session_t *s = (lwftp_session_t*)arg;
+   s->data_recv_timer = 0; 
 
-  if (p) {
-    if (s->data_sink) {
-      struct pbuf *q;
-      for (q=p; q; q=q->next) {
-        s->data_sink(s->handle, q->payload, q->len);
+   if (p == NULL) {
+      // NULL pbuf shall lead to close the pcb. Close is postponed after
+      // the session state machine updates. No need to close right here.
+      // Instead we kindly tell data sink we are done
+      p = pbuf_alloc(PBUF_RAW, 0, PBUF_REF);
+   }
+
+   if (p) {
+      if (s->data_pbuf != NULL) {
+         pbuf_cat(s->data_pbuf, p);
       }
-    } else {
-      LWIP_DEBUGF(LWFTP_SEVERE, ("lwftp: sinking %d bytes\n",p->tot_len));
-    }
-    tcp_recved(tpcb, p->tot_len);
-    pbuf_free(p);
-  } else {
-    // NULL pbuf shall lead to close the pcb. Close is postponed after
-    // the session state machine updates. No need to close right here.
-    // Instead we kindly tell data sink we are done
-    if (s->data_sink) {
-      s->data_sink(s->handle, NULL, 0);
-    }
-  }
-  return ERR_OK;
+      else {
+         s->data_pbuf = p;
+      }
+      if (s->rts != NULL) {
+         s->rts(s->handle);
+      }
+      else {
+         lwftp_data_sink(s);
+      }
+   }
+   return ERR_OK;
 }
 
 /** Handle data connection acknowledge of sent data
@@ -734,6 +759,10 @@ exit:
   return retval;
 }
 
+void lwftp_cts(lwftp_session_t *s)
+{
+   tcpip_callback(lwftp_data_sink, s);
+}
 
 /** Retrieve size of a remote file
  * @param Session structure

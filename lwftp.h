@@ -89,7 +89,9 @@ typedef struct {
   uint          (*data_sink)(void*, const char*, uint);
   void          (*done_fn)(void*, int);
   void          (*size_fn)(void*, int, size_t);
+  void          (*rts)(void*);
   uint          receive_timeout;
+  uint          timeout;
   // Internal data
   lwftp_state_t   control_state;
   lwftp_state_t   target_state;
@@ -97,12 +99,14 @@ typedef struct {
   struct tcp_pcb  *control_pcb;
   struct tcp_pcb  *data_pcb;
   u32_t           data_recv_timer;
+  struct pbuf     *data_pbuf;
 } lwftp_session_t;
 
 // LWFTP API
 err_t lwftp_connect(lwftp_session_t *s);
 err_t lwftp_store(lwftp_session_t *s);
 err_t lwftp_retrieve(lwftp_session_t *s);
+void lwftp_cts(lwftp_session_t *s);
 err_t lwftp_size(lwftp_session_t *s);
 void  lwftp_close(lwftp_session_t *s);
 
