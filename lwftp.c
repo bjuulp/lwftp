@@ -180,7 +180,9 @@ static void lwftp_data_err(void *arg, err_t err)
     lwftp_session_t *s = (lwftp_session_t*)arg;
     LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:failed/error connecting for data to server (%s)\n",lwip_strerr(err)));
     s->data_pcb = NULL; // No need to de-allocate PCB
-    if (s->control_state==LWFTP_XFERING) { // gracefully move control session ahead
+    if (s->control_state==LWFTP_XFERING ||
+        s->control_state==LWFTP_RETR_SENT ||
+        s->control_state==LWFTP_STOR_SENT) { // gracefully move control session ahead
       s->control_state = LWFTP_DATAEND;
       lwftp_control_process(s, NULL, NULL);
     }
@@ -493,7 +495,8 @@ static void lwftp_control_process(lwftp_session_t *s, struct tcp_pcb *tpcb, stru
       }
       break;
     case LWFTP_DATAEND:
-      LOG_TRACE("forced end of data session");
+      LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:forced end of data session\n"));
+      result = LWFTP_RESULT_ERR_CONNECT;
       break;
     case LWFTP_QUIT_SENT:
       if (response>0) {
