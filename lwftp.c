@@ -360,7 +360,35 @@ static void lwftp_control_process(lwftp_session_t *s, struct tcp_pcb *tpcb, stru
         }
         else {
           s->control_state = LWFTP_DATAEND;
-          LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:expected 150, received %d\n",response));
+          LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:expected 150 or 125, received %d\n",response));
+        }
+      }
+      break;
+    case LWFTP_SIZE_SENT:
+      if (response>0) {
+        size_t file_size = 0;
+        if (response==213) {
+          s->control_state = LWFTP_LOGGED;
+          char* size_str = strstr(p->payload, " ");
+          if (size_str) {
+              file_size = strtoul(size_str + 1, NULL, 10);
+              result = LWFTP_RESULT_OK;
+          }
+          else {
+              result = LWFTP_RESULT_ERR_SRVR_RESP;
+          }
+        } else if (response==550) {
+            s->control_state = LWFTP_LOGGED;
+            result = LWFTP_RESULT_ERR_FILENAME;
+            LWIP_DEBUGF(LWFTP_WARNING, ("lwftp: Failed to open file '%s'\n", s->remote_path));
+        }
+        else {
+          s->control_state = LWFTP_QUIT;
+          result = LWFTP_RESULT_ERR_SRVR_RESP;
+          LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:expected 213 or 550, received %d\n",response));
+        }
+        if (s->size_fn) {
+            s->size_fn(s->handle, result, file_size);
         }
       }
       break;
@@ -441,6 +469,24 @@ static void lwftp_start_RETR(void *arg)
   } else {
     LOG_ERROR("Unexpected condition");
     if (s->done_fn) s->done_fn(s->handle, LWFTP_RESULT_ERR_INTERNAL);
+  }
+}
+
+/** Start a SIZE control session
+ * @param pointer to lwftp session
+ */
+static void lwftp_send_SIZE(void *arg)
+{
+  lwftp_session_t *s = (lwftp_session_t*)arg;
+
+  if ( s->control_state == LWFTP_LOGGED ) {
+    lwftp_send_msg(s, PTRNLEN("SIZE "));
+    lwftp_send_msg(s, s->remote_path, strlen(s->remote_path));
+    lwftp_send_msg(s, PTRNLEN("\r\n"));
+    s->control_state = LWFTP_SIZE_SENT;
+  } else {
+    LOG_ERROR("Unexpected condition");
+    if (s->size_fn) s->size_fn(s->handle, LWFTP_RESULT_ERR_INTERNAL, 0);
   }
 }
 
@@ -635,6 +681,40 @@ err_t lwftp_retrieve(lwftp_session_t *s)
 
 exit:
   if (s->done_fn) s->done_fn(s->handle, retval);
+  return retval;
+}
+
+
+/** Retrieve size of a remote file
+ * @param Session structure
+ */
+err_t lwftp_size(lwftp_session_t *s)
+{
+  err_t error;
+  enum lwftp_results retval = LWFTP_RESULT_ERR_UNKNOWN;
+
+  // Check user supplied data
+  if ( (s->control_state!=LWFTP_LOGGED) ||
+       !s->remote_path)
+  {
+    LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:invalid session data\n"));
+    retval = LWFTP_RESULT_ERR_ARGUMENT;
+    goto exit;
+  }
+
+  // Initiate transfer
+  error = tcpip_callback(lwftp_send_SIZE, s);
+  if ( error == ERR_OK ) {
+    retval = LWFTP_RESULT_INPROGRESS;
+  } else {
+    // This is a critical error, try to close anyway
+    // polling process may save us
+    LOG_ERROR("cannot request for size");
+    s->control_state = LWFTP_QUIT;
+  }
+
+exit:
+  if (s->size_fn) s->size_fn(s->handle, retval, 0);
   return retval;
 }
 
