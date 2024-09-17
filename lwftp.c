@@ -539,6 +539,16 @@ static void lwftp_start_RETR(void *arg)
 {
   lwftp_session_t *s = (lwftp_session_t*)arg;
 
+  // Get data pcb
+  s->data_pcb = tcp_new();
+  if (!s->data_pcb) {
+    LWIP_DEBUGF(LWFTP_SERIOUS, ("lwftp:cannot alloc data_pcb (low memory?)\n"));
+    if (s->done_fn) {
+       s->done_fn(s->handle, LWFTP_RESULT_ERR_MEMORY);
+    }
+    return;
+  }
+
   if ( s->control_state == LWFTP_LOGGED ) {
     lwftp_send_msg(s, PTRNLEN("TYPE I\r\n"));
     s->control_state = LWFTP_TYPE_SENT;
@@ -573,6 +583,16 @@ static void lwftp_send_SIZE(void *arg)
 static void lwftp_start_STOR(void *arg)
 {
   lwftp_session_t *s = (lwftp_session_t*)arg;
+
+  // Get data pcb
+  s->data_pcb = tcp_new();
+  if (!s->data_pcb) {
+    LWIP_DEBUGF(LWFTP_SERIOUS, ("lwftp:cannot alloc data_pcb (low memory?)\n"));
+    if (s->done_fn) {
+       s->done_fn(s->handle, LWFTP_RESULT_ERR_MEMORY);
+    }
+    return;
+  }
 
   if ( s->control_state == LWFTP_LOGGED ) {
     lwftp_send_msg(s, PTRNLEN("TYPE I\r\n"));
@@ -682,26 +702,12 @@ static err_t lwftp_control_connected(void *arg, struct tcp_pcb *tpcb, err_t err)
   return err;
 }
 
-
-/** Open a control session
- * @param Session structure
- */
-err_t lwftp_connect(lwftp_session_t *s)
+static void lwftp_start_CONN(void *arg)
 {
   err_t error;
   enum lwftp_results retval = LWFTP_RESULT_ERR_UNKNOWN;
+  lwftp_session_t *s = (lwftp_session_t *)arg;
 
-  // Check user supplied data
-  if ( (s->control_state!=LWFTP_CLOSED) ||
-       s->control_pcb ||
-       s->data_pcb ||
-       !s->user ||
-       !s->pass )
-  {
-    LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:invalid control session\n"));
-    retval = LWFTP_RESULT_ERR_ARGUMENT;
-    goto exit;
-  }
   // Get sessions pcb
   s->control_pcb = tcp_new();
   if (!s->control_pcb) {
@@ -725,6 +731,40 @@ err_t lwftp_connect(lwftp_session_t *s)
   lwftp_control_close(s, -1);
 
 exit:
+  if (s->done_fn) {
+     s->done_fn(s->handle, retval);
+  }
+}
+
+/** Open a control session
+ * @param Session structure
+ */
+err_t lwftp_connect(lwftp_session_t *s)
+{
+  err_t error;
+  enum lwftp_results retval = LWFTP_RESULT_ERR_UNKNOWN;
+
+  // Check user supplied data
+  if ( (s->control_state!=LWFTP_CLOSED) ||
+       s->control_pcb ||
+       s->data_pcb ||
+       !s->user ||
+       !s->pass )
+  {
+    LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:invalid control session\n"));
+    retval = LWFTP_RESULT_ERR_ARGUMENT;
+    goto exit;
+  }
+
+  error = tcpip_callback(lwftp_start_CONN, s);
+  if (error == ERR_OK) {
+     retval = LWFTP_RESULT_INPROGRESS;
+  } else {
+     LOG_ERROR("cannot start CONN (%s)", lwip_strerr(error));
+     retval = LWFTP_RESULT_ERR_INTERNAL;
+  }
+
+exit:
   if (s->done_fn) s->done_fn(s->handle, retval);
   return retval;
 }
@@ -745,13 +785,6 @@ err_t lwftp_retrieve(lwftp_session_t *s)
   {
     LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:invalid session data\n"));
     retval = LWFTP_RESULT_ERR_ARGUMENT;
-    goto exit;
-  }
-  // Get data pcb
-  s->data_pcb = tcp_new();
-  if (!s->data_pcb) {
-    LWIP_DEBUGF(LWFTP_SERIOUS, ("lwftp:cannot alloc data_pcb (low memory?)\n"));
-    retval = LWFTP_RESULT_ERR_MEMORY;
     goto exit;
   }
   // Initiate transfer
@@ -822,13 +855,6 @@ err_t lwftp_store(lwftp_session_t *s)
   {
     LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:invalid session data\n"));
     retval = LWFTP_RESULT_ERR_ARGUMENT;
-    goto exit;
-  }
-  // Get data pcb
-  s->data_pcb = tcp_new();
-  if (!s->data_pcb) {
-    LWIP_DEBUGF(LWFTP_SERIOUS, ("lwftp:cannot alloc data_pcb (low memory?)\n"));
-    retval = LWFTP_RESULT_ERR_MEMORY;
     goto exit;
   }
   // Initiate transfer
