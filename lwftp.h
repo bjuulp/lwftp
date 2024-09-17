@@ -88,6 +88,7 @@ typedef struct {
   uint          (*data_source)(void*, const char**, uint);
   uint          (*data_sink)(void*, const char*, uint);
   void          (*done_fn)(void*, int);
+  void          (*close_done_fn)(void*, int);
   void          (*size_fn)(void*, int, size_t);
   void          (*rts)(void*);
   uint          receive_timeout;
@@ -108,7 +109,7 @@ err_t lwftp_store(lwftp_session_t *s);
 err_t lwftp_retrieve(lwftp_session_t *s);
 void lwftp_cts(lwftp_session_t *s);
 err_t lwftp_size(lwftp_session_t *s);
-void  lwftp_close(lwftp_session_t *s);
+err_t lwftp_close(lwftp_session_t *s);
 
 #ifdef __cplusplus
 }

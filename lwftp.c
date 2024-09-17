@@ -296,8 +296,16 @@ static void lwftp_control_close(lwftp_session_t *s, int result)
     s->control_pcb = NULL;
   }
   s->control_state = LWFTP_CLOSED;
-  if ( (result >= 0) && s->done_fn ) {
-    s->done_fn(s->handle, result);
+  if ( result >= 0 ) {
+    // Call done_fn before the close_done_fn so that the relying party will be
+    // informed by the result of an ongoing operation before being told that
+    // connection close completed.
+    if (s->done_fn) {
+      s->done_fn(s->handle, result);
+    }
+    if (s->close_done_fn) {
+      s->close_done_fn(s->handle, result);
+    }
   }
 }
 
@@ -436,7 +444,7 @@ static void lwftp_control_process(lwftp_session_t *s, struct tcp_pcb *tpcb, stru
               s->control_state = LWFTP_SIZE_SENT;
               break;
             default:
-              LOG_ERROR("Unexpected internal state");
+              LWIP_DEBUGF(LWFTP_SEVERE, ("Unexpected internal state"));
               s->target_state = LWFTP_QUIT;
             }
           lwftp_send_msg(s, s->remote_path, strlen(s->remote_path));
@@ -561,6 +569,14 @@ static void lwftp_start_RETR(void *arg)
 {
   lwftp_session_t *s = (lwftp_session_t*)arg;
 
+  if ( (s->control_state != LWFTP_LOGGED) || s->data_pcb ) {
+    LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:RETR requested in bad state\n"));
+    if (s->done_fn) {
+      s->done_fn(s->handle, LWFTP_RESULT_ERR_INTERNAL);
+    }
+    return;
+  }
+
   // Get data pcb
   s->data_pcb = tcp_new();
   if (!s->data_pcb) {
@@ -571,20 +587,15 @@ static void lwftp_start_RETR(void *arg)
     return;
   }
 
-  if ( s->control_state == LWFTP_LOGGED ) {
-    lwftp_send_msg(s, PTRNLEN("TYPE I\r\n"));
-    s->control_state = LWFTP_TYPE_SENT;
-    s->target_state = LWFTP_RETR_SENT;
-  } else {
-    LOG_ERROR("Unexpected condition");
-    if (s->done_fn) s->done_fn(s->handle, LWFTP_RESULT_ERR_INTERNAL);
-  }
+  lwftp_send_msg(s, PTRNLEN("TYPE I\r\n"));
+  s->control_state = LWFTP_TYPE_SENT;
+  s->target_state = LWFTP_RETR_SENT;
 }
 
 /** Start a SIZE control session
  * @param pointer to lwftp session
  */
-static void lwftp_send_SIZE(void *arg)
+static void lwftp_start_SIZE(void *arg)
 {
   lwftp_session_t *s = (lwftp_session_t*)arg;
 
@@ -593,8 +604,10 @@ static void lwftp_send_SIZE(void *arg)
     s->control_state = LWFTP_TYPE_SENT;
     s->target_state = LWFTP_SIZE_SENT;
   } else {
-    LOG_ERROR("Unexpected condition");
-    if (s->size_fn) s->size_fn(s->handle, LWFTP_RESULT_ERR_INTERNAL, 0);
+    LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:SIZE requested in bad state\n"));
+    if (s->size_fn) {
+      s->size_fn(s->handle, LWFTP_RESULT_ERR_INTERNAL, 0);
+    }
   }
 }
 
@@ -604,6 +617,14 @@ static void lwftp_send_SIZE(void *arg)
 static void lwftp_start_STOR(void *arg)
 {
   lwftp_session_t *s = (lwftp_session_t*)arg;
+  
+  if ( (s->control_state!=LWFTP_LOGGED) || s->data_pcb ) {
+    LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:STOR started in bad state\n"));
+    if (s->done_fn) {
+       s->done_fn(s->handle, LWFTP_RESULT_ERR_INTERNAL);
+    }
+    return;
+  }
 
   // Get data pcb
   s->data_pcb = tcp_new();
@@ -615,14 +636,9 @@ static void lwftp_start_STOR(void *arg)
     return;
   }
 
-  if ( s->control_state == LWFTP_LOGGED ) {
-    lwftp_send_msg(s, PTRNLEN("TYPE I\r\n"));
-    s->control_state = LWFTP_TYPE_SENT;
-    s->target_state = LWFTP_STOR_SENT;
-  } else {
-    LOG_ERROR("Unexpected condition");
-    if (s->done_fn) s->done_fn(s->handle, LWFTP_RESULT_ERR_INTERNAL);
-  }
+  lwftp_send_msg(s, PTRNLEN("TYPE I\r\n"));
+  s->control_state = LWFTP_TYPE_SENT;
+  s->target_state = LWFTP_STOR_SENT;
 }
 
 /** Send QUIT to terminate control session
@@ -631,17 +647,21 @@ static void lwftp_start_STOR(void *arg)
 static void lwftp_send_QUIT(void *arg)
 {
   lwftp_session_t *s = (lwftp_session_t*)arg;
-
-  if (s->control_pcb) {
-    if (s->control_state == LWFTP_LOGGED)
-    {
-      lwftp_send_msg(s, PTRNLEN("QUIT\r\n"));
-      s->control_state = LWFTP_QUIT_SENT;
+  
+  // Nothing to do when already closed
+  if (s->control_state == LWFTP_CLOSED) {
+    if (s->close_done_fn) {
+      s->close_done_fn(s->handle, LWFTP_RESULT_OK);
     }
-    else
-    {
-       s->control_state = LWFTP_QUIT;
-    }
+  }
+  else if (s->control_state == LWFTP_LOGGED)
+  {
+    lwftp_send_msg(s, PTRNLEN("QUIT\r\n"));
+    s->control_state = LWFTP_QUIT_SENT;
+  } else if (s->control_state != LWFTP_QUIT_SENT) {
+    // Don't change state if we've already sent a QUIT. Otherwise, wait for the poll timer to detect
+    // timeout or something to get back from the server before we handle this state.
+    s->control_state = LWFTP_QUIT;
   }
 }
 
@@ -691,7 +711,7 @@ static void lwftp_control_err(void *arg, err_t err)
   LWIP_UNUSED_ARG(err);
   if (arg != NULL) {
     lwftp_session_t *s = (lwftp_session_t*)arg;
-    int result;
+    enum lwftp_results result;
     if( s->control_state == LWFTP_CLOSED ) {
       LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:failed to connect to server (%s)\n",lwip_strerr(err)));
       result = LWFTP_RESULT_ERR_CONNECT;
@@ -716,7 +736,7 @@ static err_t lwftp_control_connected(void *arg, struct tcp_pcb *tpcb, err_t err)
 
   if ( err == ERR_OK ) {
     LWIP_DEBUGF(LWFTP_STATE, ("lwftp:connected to server\n"));
-      s->control_state = LWFTP_CONNECTED;
+    s->control_state = LWFTP_CONNECTED;
   } else {
     LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:err in control_connected (%s)\n",lwip_strerr(err)));
   }
@@ -726,16 +746,29 @@ static err_t lwftp_control_connected(void *arg, struct tcp_pcb *tpcb, err_t err)
 static void lwftp_start_CONN(void *arg)
 {
   err_t error;
-  enum lwftp_results retval = LWFTP_RESULT_ERR_UNKNOWN;
   lwftp_session_t *s = (lwftp_session_t *)arg;
+
+  if ( (s->control_state != LWFTP_CLOSED) ||
+       s->control_pcb ||
+       s->data_pcb )
+  {
+    LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:CONN requested in bad state\n"));
+    if (s->done_fn) {
+       s->done_fn(s->handle, LWFTP_RESULT_ERR_INTERNAL);
+    }
+    return;
+  }
 
   // Get sessions pcb
   s->control_pcb = tcp_new();
   if (!s->control_pcb) {
     LWIP_DEBUGF(LWFTP_SERIOUS, ("lwftp:cannot alloc control_pcb (low memory?)\n"));
-    retval = LWFTP_RESULT_ERR_MEMORY;
-    goto exit;
+    if (s->done_fn) {
+       s->done_fn(s->handle, LWFTP_RESULT_ERR_MEMORY);
+    }
+    return;
   }
+
   // Open control session
   tcp_arg(s->control_pcb, s);
   tcp_err(s->control_pcb, lwftp_control_err);
@@ -743,18 +776,12 @@ static void lwftp_start_CONN(void *arg)
   tcp_sent(s->control_pcb, lwftp_control_sent);
   error = tcp_connect(s->control_pcb, &s->server_ip, s->server_port, lwftp_control_connected);
   if ( error == ERR_OK ) {
-    retval = LWFTP_RESULT_INPROGRESS;
-    goto exit;
+    return; 
   }
 
   // Release pcbs in case of failure
   LWIP_DEBUGF(LWFTP_SERIOUS, ("lwftp:cannot connect control_pcb (%s)\n", lwip_strerr(error)));
-  lwftp_control_close(s, -1);
-
-exit:
-  if (s->done_fn) {
-     s->done_fn(s->handle, retval);
-  }
+  lwftp_control_close(s, LWFTP_RESULT_ERR_INTERNAL);
 }
 
 /** Open a control session
@@ -763,31 +790,20 @@ exit:
 err_t lwftp_connect(lwftp_session_t *s)
 {
   err_t error;
-  enum lwftp_results retval = LWFTP_RESULT_ERR_UNKNOWN;
 
   // Check user supplied data
-  if ( (s->control_state!=LWFTP_CLOSED) ||
-       s->control_pcb ||
-       s->data_pcb ||
-       !s->user ||
-       !s->pass )
-  {
-    LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:invalid control session\n"));
-    retval = LWFTP_RESULT_ERR_ARGUMENT;
-    goto exit;
+  if ( !s->user || !s->pass ) {
+    LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:No user or password specified\n"));
+    return LWFTP_RESULT_ERR_ARGUMENT;
   }
 
   error = tcpip_callback(lwftp_start_CONN, s);
-  if (error == ERR_OK) {
-     retval = LWFTP_RESULT_INPROGRESS;
-  } else {
-     LOG_ERROR("cannot start CONN (%s)", lwip_strerr(error));
-     retval = LWFTP_RESULT_ERR_INTERNAL;
+  if ( error == ERR_OK ) {
+     return LWFTP_RESULT_INPROGRESS;
   }
-
-exit:
-  if (s->done_fn) s->done_fn(s->handle, retval);
-  return retval;
+  
+  LWIP_DEBUGF(LWFTP_SEVERE, ("cannot start CONN (%s)", lwip_strerr(error)));
+  return LWFTP_RESULT_ERR_INTERNAL;
 }
 
 
@@ -797,34 +813,26 @@ exit:
 err_t lwftp_retrieve(lwftp_session_t *s)
 {
   err_t error;
-  enum lwftp_results retval = LWFTP_RESULT_ERR_UNKNOWN;
 
   // Check user supplied data
-  if ( (s->control_state!=LWFTP_LOGGED) ||
-       !s->remote_path ||
-       s->data_pcb )
-  {
+  if ( !s->remote_path ) {
     LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:invalid session data\n"));
-    retval = LWFTP_RESULT_ERR_ARGUMENT;
-    goto exit;
+    return LWFTP_RESULT_ERR_ARGUMENT;
   }
+
   // Initiate transfer
   error = tcpip_callback(lwftp_start_RETR, s);
   if ( error == ERR_OK ) {
-    retval = LWFTP_RESULT_INPROGRESS;
-  } else {
-    LOG_ERROR("cannot start RETR (%s)",lwip_strerr(error));
-    retval = LWFTP_RESULT_ERR_INTERNAL;
+    return LWFTP_RESULT_INPROGRESS;
   }
-
-exit:
-  if (s->done_fn) s->done_fn(s->handle, retval);
-  return retval;
+  
+  LWIP_DEBUGF(LWFTP_SEVERE, ("cannot start RETR (%s)",lwip_strerr(error)));
+  return LWFTP_RESULT_ERR_INTERNAL;
 }
 
 void lwftp_cts(lwftp_session_t *s)
 {
-   tcpip_callback(lwftp_data_sink, s);
+   (void)tcpip_callback(lwftp_data_sink, s);
 }
 
 /** Retrieve size of a remote file
@@ -833,31 +841,21 @@ void lwftp_cts(lwftp_session_t *s)
 err_t lwftp_size(lwftp_session_t *s)
 {
   err_t error;
-  enum lwftp_results retval = LWFTP_RESULT_ERR_UNKNOWN;
-
+  
   // Check user supplied data
-  if ( (s->control_state!=LWFTP_LOGGED) ||
-       !s->remote_path)
-  {
-    LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:invalid session data\n"));
-    retval = LWFTP_RESULT_ERR_ARGUMENT;
-    goto exit;
+  if ( !s->remote_path ) {
+    LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:invalid remote path\n"));
+    return LWFTP_RESULT_ERR_ARGUMENT;
   }
 
   // Initiate transfer
-  error = tcpip_callback(lwftp_send_SIZE, s);
+  error = tcpip_callback(lwftp_start_SIZE, s);
   if ( error == ERR_OK ) {
-    retval = LWFTP_RESULT_INPROGRESS;
-  } else {
-    // This is a critical error, try to close anyway
-    // polling process may save us
-    LOG_ERROR("cannot request for size");
-    s->control_state = LWFTP_QUIT;
+    return LWFTP_RESULT_INPROGRESS;
   }
 
-exit:
-  if (s->size_fn) s->size_fn(s->handle, retval, 0);
-  return retval;
+  LWIP_DEBUGF(LWFTP_SEVERE, ("cannot start SIZE (%s)",lwip_strerr(error)));
+  return LWFTP_RESULT_ERR_INTERNAL;
 }
 
 
@@ -867,48 +865,35 @@ exit:
 err_t lwftp_store(lwftp_session_t *s)
 {
   err_t error;
-  enum lwftp_results retval = LWFTP_RESULT_ERR_UNKNOWN;
 
   // Check user supplied data
-  if ( (s->control_state!=LWFTP_LOGGED) ||
-       !s->remote_path ||
-       s->data_pcb )
-  {
-    LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:invalid session data\n"));
-    retval = LWFTP_RESULT_ERR_ARGUMENT;
-    goto exit;
+  if ( !s->remote_path ) {
+    LWIP_DEBUGF(LWFTP_WARNING, ("lwftp:invalid remote path\n"));
+    return LWFTP_RESULT_ERR_ARGUMENT;
   }
+
   // Initiate transfer
   error = tcpip_callback(lwftp_start_STOR, s);
   if ( error == ERR_OK ) {
-    retval = LWFTP_RESULT_INPROGRESS;
-  } else {
-    LOG_ERROR("cannot start STOR (%s)",lwip_strerr(error));
-    retval = LWFTP_RESULT_ERR_INTERNAL;
+    return LWFTP_RESULT_INPROGRESS;
   }
 
-exit:
-  if (s->done_fn) s->done_fn(s->handle, retval);
-  return retval;
+  LWIP_DEBUGF(LWFTP_SEVERE, ("cannot start STOR (%s)",lwip_strerr(error)));
+  return LWFTP_RESULT_ERR_INTERNAL;
 }
 
 
 /** Terminate FTP session
  * @param Session structure
  */
-void lwftp_close(lwftp_session_t *s)
+err_t lwftp_close(lwftp_session_t *s)
 {
-  err_t error;
-
-  // Nothing to do when already closed
-  if ( s->control_state == LWFTP_CLOSED ) return;
-
   // Initiate transfer
-  error = tcpip_callback(lwftp_send_QUIT, s);
-  if ( error != ERR_OK ) {
-    // This is a critical error, try to close anyway
-    // polling process may save us
-    LOG_ERROR("cannot request for close");
-    s->control_state = LWFTP_QUIT;
+  err_t error = tcpip_callback(lwftp_send_QUIT, s);
+  if ( error == ERR_OK ) {
+    return LWFTP_RESULT_INPROGRESS;
   }
+
+  LWIP_DEBUGF(LWFTP_SEVERE, ("cannot start QUIT (%s)",lwip_strerr(error)));
+  return LWFTP_RESULT_ERR_INTERNAL;
 }
